@@ -1,0 +1,490 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Sandbox Room</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            font-family: 'Inter', sans-serif;
+            background-color: #1a1a1a;
+            color: #f0f0f0;
+        }
+        canvas {
+            display: block;
+        }
+        #loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: white;
+            font-size: 24px;
+            background-color: rgba(0,0,0,0.7);
+            padding: 20px;
+            border-radius: 15px;
+            z-index: 200;
+            display: none; 
+        }
+        #ui-container {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            z-index: 101;
+        }
+        .ui-button {
+            padding: 10px 15px;
+            font-size: 16px;
+            font-family: 'Inter', sans-serif;
+            background-color: rgba(0, 0, 0, 0.6);
+            color: white;
+            border: 1px solid white;
+            border-radius: 8px;
+            cursor: pointer;
+            margin-right: 10px;
+        }
+        .ui-button:hover {
+            background-color: rgba(255, 255, 255, 0.2);
+        }
+        .ui-button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        .ui-button.active {
+            background-color: #4a90e2;
+            border-color: #4a90e2;
+        }
+        #info-panel {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            background-color: rgba(0, 0, 0, 0.7);
+            padding: 15px;
+            border-radius: 8px;
+            color: white;
+            font-size: 14px;
+            z-index: 101;
+            display: none; /* Hidden by default */
+            width: 250px;
+        }
+        #info-panel pre {
+            margin: 0;
+            padding: 0;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+        #copyCoordsBtn {
+            width: 100%;
+            margin-top: 10px;
+        }
+        #controls-hint {
+            position: absolute;
+            bottom: 80px;
+            left: 20px;
+            background-color: rgba(0,0,0,0.7);
+            color: white;
+            padding: 8px;
+            border-radius: 5px;
+            font-size: 14px;
+            display: none;
+            z-index: 101;
+        }
+    </style>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div id="ui-container">
+        <button id="undoBtn" class="ui-button" disabled>Undo</button>
+        <button id="redoBtn" class="ui-button" disabled>Redo</button>
+        <button id="gridToggleBtn" class="ui-button">Toggle Grid</button>
+        <button id="moveModeBtn" class="ui-button">Move Items</button>
+        <button id="copyAllBtn" class="ui-button">Copy All</button>
+    </div>
+    <div id="controls-hint">Select an object. Use T (Move), R (Rotate), S (Scale) keys to change gizmo.</div>
+     <div id="info-panel">
+        <pre id="object-data"></pre>
+        <button id="copyCoordsBtn" class="ui-button">Copy Selected</button>
+    </div>
+    <div id="loading">Loading...</div>
+    <script async src="https://unpkg.com/es-module-shims@1.6.3/dist/es-module-shims.js"></script>
+    <script type="importmap">
+    {
+        "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.157.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.157.0/examples/jsm/"
+        }
+    }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+        import { TransformControls } from 'three/addons/controls/TransformControls.js';
+        
+        let camera, scene, renderer, orbitControls, transformControls;
+        let directionalLight, ambientLight, lightSwitch, floor;
+        let isDay = true, isGridFloor = false, isMoveMode = false;
+        let woodFloorTexture, gridTexture;
+        const raycaster = new THREE.Raycaster();
+        const mouse = new THREE.Vector2();
+        
+        const draggableObjects = [];
+        let selectedObject = null;
+
+        // --- History Management for Undo/Redo ---
+        const history = [];
+        let historyIndex = -1;
+
+        const dayColors = { sky: new THREE.Color(0xAEDFF7), ambient: 1.0, directional: 1.2 };
+        const nightColors = { sky: new THREE.Color(0x0a0f1c), ambient: 0.2, directional: 0.0 };
+
+        const loadingManager = new THREE.LoadingManager();
+        const loadingElement = document.getElementById('loading');
+        const gridToggleBtn = document.getElementById('gridToggleBtn');
+        const moveModeBtn = document.getElementById('moveModeBtn');
+        const copyAllBtn = document.getElementById('copyAllBtn');
+        const infoPanel = document.getElementById('info-panel');
+        const objectDataEl = document.getElementById('object-data');
+        const copyCoordsBtn = document.getElementById('copyCoordsBtn');
+        const controlsHint = document.getElementById('controls-hint');
+        const undoBtn = document.getElementById('undoBtn');
+        const redoBtn = document.getElementById('redoBtn');
+
+        loadingManager.onStart = () => { loadingElement.style.display = 'block'; };
+        loadingManager.onLoad = () => { 
+            loadingElement.style.display = 'none'; 
+            saveState(); // Save initial state
+        };
+        loadingManager.onError = (url) => { console.error('Error loading ' + url); };
+
+        function init() {
+            scene = new THREE.Scene();
+            scene.background = dayColors.sky.clone();
+
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.set(0, 2.5, 10);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.shadowMap.enabled = true;
+            document.body.appendChild(renderer.domElement);
+
+            orbitControls = new OrbitControls(camera, renderer.domElement);
+            orbitControls.enableDamping = true;
+            orbitControls.target.set(0, 0.5, 0);
+
+            transformControls = new TransformControls(camera, renderer.domElement);
+            transformControls.addEventListener('dragging-changed', (event) => {
+                orbitControls.enabled = !event.value;
+                if (!event.value) { // Drag ended
+                    saveState();
+                }
+            });
+            transformControls.addEventListener('objectChange', updateInfoPanel);
+            scene.add(transformControls);
+
+            ambientLight = new THREE.AmbientLight(0xffffff, dayColors.ambient);
+            scene.add(ambientLight);
+            directionalLight = new THREE.DirectionalLight(0xffffff, dayColors.directional);
+            directionalLight.position.set(10, 15, 5);
+            directionalLight.castShadow = true;
+            directionalLight.shadow.mapSize.width = 2048;
+            directionalLight.shadow.mapSize.height = 2048;
+            scene.add(directionalLight);
+
+            buildRoom();
+            loadModels();
+            
+            renderer.domElement.addEventListener('mousedown', onMouseDown);
+            gridToggleBtn.addEventListener('click', (e) => { e.stopPropagation(); toggleFloor(); });
+            moveModeBtn.addEventListener('click', (e) => { e.stopPropagation(); toggleMoveMode(); });
+            copyCoordsBtn.addEventListener('click', (e) => { e.stopPropagation(); copyObjectData(); });
+            copyAllBtn.addEventListener('click', (e) => { e.stopPropagation(); copyAllObjectData(); });
+            undoBtn.addEventListener('click', (e) => { e.stopPropagation(); undo(); });
+            redoBtn.addEventListener('click', (e) => { e.stopPropagation(); redo(); });
+            window.addEventListener('resize', onWindowResize);
+            window.addEventListener('keydown', onKeyDown);
+
+            animate();
+        }
+
+        function buildRoom() {
+            const roomSize = { width: 12, height: 3, depth: 12 };
+            woodFloorTexture = createWoodFloorTexture('#DEA057', '#C98E4A');
+            gridTexture = createGridTexture(roomSize.width, roomSize.depth, 0.5);
+            const floorMaterial = new THREE.MeshLambertMaterial({ map: woodFloorTexture });
+            floor = new THREE.Mesh(new THREE.PlaneGeometry(roomSize.width, roomSize.depth), floorMaterial);
+            floor.rotation.x = -Math.PI / 2;
+            floor.receiveShadow = true;
+            floor.name = "floor";
+            scene.add(floor);
+
+            const wallMaterial = new THREE.MeshLambertMaterial({ color: 0xFFFBF0 });
+            const ceilingMaterial = new THREE.MeshLambertMaterial({ color: 0xFFFFFF });
+            const ceiling = new THREE.Mesh(new THREE.PlaneGeometry(roomSize.width, roomSize.depth), ceilingMaterial);
+            ceiling.rotation.x = Math.PI / 2;
+            ceiling.position.y = roomSize.height;
+            scene.add(ceiling);
+            const leftWall = new THREE.Mesh(new THREE.PlaneGeometry(roomSize.depth, roomSize.height), wallMaterial);
+            leftWall.position.set(-roomSize.width / 2, roomSize.height / 2, 0);
+            leftWall.rotation.y = Math.PI / 2;
+            leftWall.receiveShadow = true;
+            scene.add(leftWall);
+            const rightWall = new THREE.Mesh(new THREE.PlaneGeometry(roomSize.depth, roomSize.height), wallMaterial);
+            rightWall.position.set(roomSize.width / 2, roomSize.height / 2, 0);
+            rightWall.rotation.y = -Math.PI / 2;
+            rightWall.receiveShadow = true;
+            scene.add(rightWall);
+            lightSwitch = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.2, 0.1), new THREE.MeshStandardMaterial({ color: 0xffffff }));
+            lightSwitch.position.set(roomSize.width / 2 - 0.1, 1.5, 2);
+            lightSwitch.name = "lightSwitch";
+            scene.add(lightSwitch);
+            const frameMaterial = new THREE.MeshLambertMaterial({ color: '#C98E4A' });
+            const backWall = createWallWithWindows(false, roomSize, wallMaterial, frameMaterial);
+            scene.add(backWall);
+            const frontWall = createWallWithWindows(true, roomSize, wallMaterial, frameMaterial);
+            scene.add(frontWall);
+        }
+        
+        function loadModels() {
+            const loader = new GLTFLoader(loadingManager);
+            const models = [
+                { url: 'https://cdn.jsdelivr.net/gh/leftyskywalker/Room@main/bongos.glb', size: 1.0, pos: new THREE.Vector3(0, 0, 0), name: 'Bongos' },
+                { url: 'https://cdn.jsdelivr.net/gh/leftyskywalker/Room@main/monstera_deliciosa_potted_mid-century_plant.glb', size: 1.5, pos: new THREE.Vector3(-4.5, 0, -4.5), name: 'Plant' },
+                { url: 'https://cdn.jsdelivr.net/gh/leftyskywalker/Room@main/grand_piano.glb', size: 2.5, pos: new THREE.Vector3(3.5, 0, 0), rot: new THREE.Euler(0, -Math.PI / 2, 0), name: 'Piano' },
+                { url: 'https://cdn.jsdelivr.net/gh/leftyskywalker/Room@main/rug_with_bottom.glb', size: 5, pos: new THREE.Vector3(0, 0.01, 0), name: 'Rug' }
+            ];
+            models.forEach(m => {
+                loader.load(m.url, (gltf) => {
+                    const model = gltf.scene;
+                    model.userData.isDraggable = true;
+                    model.userData.name = m.name;
+                    setupModel(model, m.size, m.pos, m.rot);
+                    draggableObjects.push(model);
+                });
+            });
+        }
+
+        function setupModel(model, desiredSize, position, rotation = new THREE.Euler(0, 0, 0)) {
+            const box = new THREE.Box3().setFromObject(model);
+            const size = box.getSize(new THREE.Vector3());
+            const maxDim = Math.max(size.x, size.y, size.z);
+            const scale = desiredSize / maxDim;
+            model.scale.set(scale, scale, scale);
+            const postScaleBox = new THREE.Box3().setFromObject(model);
+            model.position.set(position.x, -postScaleBox.min.y + position.y, position.z);
+            model.rotation.copy(rotation);
+            model.traverse(node => { if (node.isMesh) { node.castShadow = true; node.receiveShadow = true; }});
+            scene.add(model);
+        }
+
+        function createWoodFloorTexture(bgColor, plankColor) {
+            const canvas = document.createElement('canvas'); const context = canvas.getContext('2d');
+            canvas.width = 512; canvas.height = 512; context.fillStyle = bgColor;
+            context.fillRect(0, 0, canvas.width, canvas.height); context.strokeStyle = plankColor;
+            context.lineWidth = 4; const plankCount = 8;
+            for (let i = 1; i < plankCount; i++) { const y = (i / plankCount) * canvas.height; context.beginPath(); context.moveTo(0, y); context.lineTo(canvas.width, y); context.stroke(); }
+            const texture = new THREE.CanvasTexture(canvas);
+            texture.wrapS = THREE.RepeatWrapping; texture.wrapT = THREE.RepeatWrapping;
+            texture.repeat.set(4, 4); return texture;
+        }
+        
+        function createGridTexture(width, depth, cellSize) {
+            const canvas = document.createElement('canvas'); const textureResolution = 2048;
+            canvas.width = textureResolution; canvas.height = textureResolution;
+            const context = canvas.getContext('2d'); context.fillStyle = '#f0f0f0';
+            context.fillRect(0, 0, canvas.width, canvas.height);
+            const divisionsX = Math.floor(width / cellSize); const divisionsZ = Math.floor(depth / cellSize);
+            const stepX = canvas.width / divisionsX; const stepZ = canvas.height / divisionsZ;
+            context.strokeStyle = '#bbbbbb'; context.lineWidth = 2;
+            context.font = `${textureResolution / 50}px sans-serif`; context.fillStyle = '#888888';
+            context.textAlign = 'center'; context.textBaseline = 'middle';
+            for (let i = 0; i <= divisionsX; i++) { const x = i * stepX; context.beginPath(); context.moveTo(x, 0); context.lineTo(x, canvas.height); context.stroke(); }
+            for (let j = 0; j <= divisionsZ; j++) { const z = j * stepZ; context.beginPath(); context.moveTo(0, z); context.lineTo(canvas.width, z); context.stroke(); }
+            for (let i = 0; i < divisionsX; i++) { for (let j = 0; j < divisionsZ; j++) { const label = String.fromCharCode(65 + i) + (j + 1); context.fillText(label, i * stepX + stepX / 2, j * stepZ + stepZ / 2); } }
+            const texture = new THREE.CanvasTexture(canvas);
+            texture.wrapS = THREE.RepeatWrapping;
+            texture.wrapT = THREE.RepeatWrapping;
+            texture.repeat.set(1, 1); return texture;
+        }
+
+        function createWallWithWindows(isFrontWall, roomSize, wallMaterial, frameMaterial) {
+            const wallGroup = new THREE.Group(); const wallZ = isFrontWall ? roomSize.depth / 2 : -roomSize.depth / 2;
+            wallGroup.position.z = wallZ; const numWindows = 2; const windowHeight = 2; const windowWidth = 2.5; const windowY = 0.5;
+            const totalWindowsWidth = numWindows * windowWidth; const spacing = (roomSize.width - totalWindowsWidth) / (numWindows + 1);
+            const belowPanel = new THREE.Mesh(new THREE.PlaneGeometry(roomSize.width, windowY), wallMaterial);
+            belowPanel.position.y = windowY / 2; wallGroup.add(belowPanel);
+            const abovePanelY = windowY + windowHeight; const abovePanelHeight = roomSize.height - abovePanelY;
+            const abovePanel = new THREE.Mesh(new THREE.PlaneGeometry(roomSize.width, abovePanelHeight), wallMaterial);
+            abovePanel.position.y = abovePanelY + abovePanelHeight / 2; wallGroup.add(abovePanel);
+            let currentX = -roomSize.width / 2;
+            for (let i = 0; i < numWindows + 1; i++) { const panel = new THREE.Mesh(new THREE.PlaneGeometry(spacing, windowHeight), wallMaterial); panel.position.set(currentX + spacing / 2, windowY + windowHeight / 2, 0); wallGroup.add(panel); currentX += spacing + windowWidth; }
+            for (let i = 0; i < numWindows; i++) { const windowX = -roomSize.width / 2 + spacing * (i + 1) + windowWidth * i; const frame = createWindowFrame(windowWidth, windowHeight, frameMaterial); frame.position.set(windowX + windowWidth / 2, windowY + windowHeight / 2, 0); wallGroup.add(frame); }
+            if (isFrontWall) { wallGroup.rotation.y = Math.PI; } wallGroup.traverse(child => { if (child.isMesh) child.receiveShadow = true; }); return wallGroup;
+        }
+
+        function createWindowFrame(width, height, frameMaterial) {
+            const frameGroup = new THREE.Group(); const frameThickness = 0.15; const mullionThickness = 0.1;
+            const top = new THREE.Mesh(new THREE.BoxGeometry(width, frameThickness, frameThickness), frameMaterial); top.position.y = height / 2 - frameThickness / 2;
+            const bottom = new THREE.Mesh(new THREE.BoxGeometry(width, frameThickness, frameThickness), frameMaterial); bottom.position.y = -height / 2 + frameThickness / 2;
+            const left = new THREE.Mesh(new THREE.BoxGeometry(frameThickness, height, frameThickness), frameMaterial); left.position.x = -width / 2 + frameThickness / 2;
+            const right = new THREE.Mesh(new THREE.BoxGeometry(frameThickness, height, frameThickness), frameMaterial); right.position.x = width / 2 - frameThickness / 2;
+            const verticalMullion = new THREE.Mesh(new THREE.BoxGeometry(mullionThickness, height, mullionThickness), frameMaterial);
+            const horizontalMullion = new THREE.Mesh(new THREE.BoxGeometry(width, mullionThickness, mullionThickness), frameMaterial);
+            frameGroup.add(top, bottom, left, right, verticalMullion, horizontalMullion);
+            frameGroup.traverse(child => { if(child.isMesh) child.castShadow = true; }); return frameGroup;
+        }
+
+        function onWindowResize() { camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix(); renderer.setSize(window.innerWidth, window.innerHeight); }
+
+        function onMouseDown(event) {
+            if (transformControls.dragging) return;
+            mouse.x = (event.clientX / renderer.domElement.clientWidth) * 2 - 1;
+            mouse.y = - (event.clientY / renderer.domElement.clientHeight) * 2 + 1;
+            raycaster.setFromCamera(mouse, camera);
+            const intersects = raycaster.intersectObjects(scene.children, true);
+
+            if (intersects.length > 0) {
+                let clickedObject = intersects[0].object; let draggableParent = null; let interactiveObject = null;
+                let tempObject = clickedObject;
+                while(tempObject) {
+                    if (tempObject.userData.isDraggable) { draggableParent = tempObject; break; }
+                    if (tempObject.name === 'lightSwitch') { interactiveObject = tempObject; break; }
+                    tempObject = tempObject.parent;
+                }
+                if (isMoveMode) { draggableParent ? selectObject(draggableParent) : deselectObject(); } 
+                else { if (interactiveObject && interactiveObject.name === 'lightSwitch') { toggleDayNight(); } }
+            } else { if (isMoveMode) { deselectObject(); } }
+        }
+
+        function onKeyDown(event) {
+            if (!isMoveMode || !selectedObject) return;
+            switch (event.key.toLowerCase()) {
+                case 'r': transformControls.setMode('rotate'); break;
+                case 't': transformControls.setMode('translate'); break;
+                case 's': transformControls.setMode('scale'); break;
+                case 'z': if(event.ctrlKey || event.metaKey){ undo(); } break;
+                case 'y': if(event.ctrlKey || event.metaKey){ redo(); } break;
+            }
+        }
+        
+        function toggleDayNight() { isDay = !isDay; const targetColors = isDay ? dayColors : nightColors; scene.background.copy(targetColors.sky); ambientLight.intensity = targetColors.ambient; directionalLight.intensity = targetColors.directional; }
+        function toggleFloor() { isGridFloor = !isGridFloor; floor.material.map = isGridFloor ? gridTexture : woodFloorTexture; floor.material.needsUpdate = true; }
+        
+        function toggleMoveMode() {
+            isMoveMode = !isMoveMode;
+            moveModeBtn.classList.toggle('active');
+            moveModeBtn.textContent = isMoveMode ? 'Exit (T,R,S)' : 'Move Items';
+            controlsHint.style.display = isMoveMode ? 'block' : 'none';
+            if (!isMoveMode) { deselectObject(); }
+        }
+        
+        function selectObject(object) {
+            deselectObject(); selectedObject = object;
+            transformControls.attach(selectedObject);
+            infoPanel.style.display = 'block';
+            updateInfoPanel();
+            selectedObject.traverse(child => { if (child.isMesh) { child.material.emissive = new THREE.Color(0x888888); }});
+        }
+
+        function deselectObject() {
+            if (selectedObject) { selectedObject.traverse(child => { if (child.isMesh) { child.material.emissive = new THREE.Color(0x000000); }}); }
+            transformControls.detach(); selectedObject = null;
+            infoPanel.style.display = 'none';
+        }
+
+        function updateInfoPanel() {
+            if (!selectedObject) return;
+            const pos = selectedObject.position; const rot = selectedObject.rotation; const scale = selectedObject.scale;
+            const data = `Name: ${selectedObject.userData.name}\n` +
+                         `pos: new THREE.Vector3(${pos.x.toFixed(2)}, ${pos.y.toFixed(2)}, ${pos.z.toFixed(2)}),\n` +
+                         `rot: new THREE.Euler(${rot.x.toFixed(2)}, ${rot.y.toFixed(2)}, ${rot.z.toFixed(2)}),\n` +
+                         `scale: new THREE.Vector3(${scale.x.toFixed(2)}, ${scale.y.toFixed(2)}, ${scale.z.toFixed(2)})`;
+            objectDataEl.textContent = data;
+        }
+        
+        function performCopy(textToCopy, buttonElement, originalText) {
+            const textArea = document.createElement('textarea'); textArea.value = textToCopy;
+            document.body.appendChild(textArea); textArea.select();
+            try { document.execCommand('copy'); buttonElement.textContent = 'Copied!'; } 
+            catch (err) { console.error('Failed to copy text: ', err); buttonElement.textContent = 'Copy Failed'; }
+            document.body.removeChild(textArea);
+            setTimeout(() => { buttonElement.textContent = originalText; }, 1500);
+        }
+
+        function copyObjectData() { performCopy(objectDataEl.textContent, copyCoordsBtn, 'Copy Selected'); }
+        
+        function copyAllObjectData() {
+            let allData = '';
+            draggableObjects.forEach(obj => {
+                const pos = obj.position; const rot = obj.rotation; const scale = obj.scale;
+                 allData += `// ${obj.userData.name}\n` +
+                            `pos: new THREE.Vector3(${pos.x.toFixed(2)}, ${pos.y.toFixed(2)}, ${pos.z.toFixed(2)}),\n` +
+                            `rot: new THREE.Euler(${rot.x.toFixed(2)}, ${rot.y.toFixed(2)}, ${rot.z.toFixed(2)}),\n` +
+                            `scale: new THREE.Vector3(${scale.x.toFixed(2)}, ${scale.y.toFixed(2)}, ${scale.z.toFixed(2)})\n\n`;
+            });
+            performCopy(allData, copyAllBtn, 'Copy All');
+        }
+
+        // --- History Functions ---
+        function saveState() {
+            const currentState = draggableObjects.map(obj => ({
+                name: obj.userData.name,
+                position: obj.position.clone(),
+                rotation: obj.rotation.clone(),
+                scale: obj.scale.clone()
+            }));
+            
+            if (historyIndex < history.length - 1) {
+                history.splice(historyIndex + 1);
+            }
+
+            history.push(currentState);
+            historyIndex = history.length - 1;
+            updateUndoRedoButtons();
+        }
+
+        function restoreState(state) {
+            state.forEach(s => {
+                const object = draggableObjects.find(o => o.userData.name === s.name);
+                if (object) {
+                    object.position.copy(s.position);
+                    object.rotation.copy(s.rotation);
+                    object.scale.copy(s.scale);
+                }
+            });
+            updateInfoPanel();
+        }
+
+        function undo() {
+            if (historyIndex > 0) {
+                historyIndex--;
+                restoreState(history[historyIndex]);
+                updateUndoRedoButtons();
+            }
+        }
+
+        function redo() {
+            if (historyIndex < history.length - 1) {
+                historyIndex++;
+                restoreState(history[historyIndex]);
+                updateUndoRedoButtons();
+            }
+        }
+
+        function updateUndoRedoButtons() {
+            undoBtn.disabled = historyIndex <= 0;
+            redoBtn.disabled = historyIndex >= history.length - 1;
+        }
+
+        function animate() { requestAnimationFrame(animate); orbitControls.update(); renderer.render(scene, camera); }
+
+        init();
+    </script>
+</body>
+</html>
