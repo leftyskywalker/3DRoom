@@ -125,6 +125,8 @@
         import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
         import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
         import { TransformControls } from 'three/addons/controls/TransformControls.js';
+        // Import the data from our new file
+        import { getObjectData } from './positions.js';
         
         let camera, scene, renderer, orbitControls, transformControls;
         let directionalLight, ambientLight, lightSwitch, floor;
@@ -136,7 +138,6 @@
         const draggableObjects = [];
         let selectedObject = null;
 
-        // --- History Management for Undo/Redo ---
         const history = [];
         let historyIndex = -1;
 
@@ -158,7 +159,7 @@
         loadingManager.onStart = () => { loadingElement.style.display = 'block'; };
         loadingManager.onLoad = () => { 
             loadingElement.style.display = 'none'; 
-            saveState(); // Save initial state
+            saveState();
         };
         loadingManager.onError = (url) => { console.error('Error loading ' + url); };
 
@@ -181,9 +182,7 @@
             transformControls = new TransformControls(camera, renderer.domElement);
             transformControls.addEventListener('dragging-changed', (event) => {
                 orbitControls.enabled = !event.value;
-                if (!event.value) { // Drag ended
-                    saveState();
-                }
+                if (!event.value) { saveState(); }
             });
             transformControls.addEventListener('objectChange', updateInfoPanel);
             scene.add(transformControls);
@@ -193,8 +192,6 @@
             directionalLight = new THREE.DirectionalLight(0xffffff, dayColors.directional);
             directionalLight.position.set(10, 15, 5);
             directionalLight.castShadow = true;
-            directionalLight.shadow.mapSize.width = 2048;
-            directionalLight.shadow.mapSize.height = 2048;
             scene.add(directionalLight);
 
             buildRoom();
@@ -253,29 +250,35 @@
         
         function loadModels() {
             const loader = new GLTFLoader(loadingManager);
-            const models = [
-                { url: 'https://cdn.jsdelivr.net/gh/leftyskywalker/Room@main/bongos.glb', size: 1.0, pos: new THREE.Vector3(0, 0, 0), name: 'Bongos' },
-                { url: 'https://cdn.jsdelivr.net/gh/leftyskywalker/Room@main/monstera_deliciosa_potted_mid-century_plant.glb', size: 1.5, pos: new THREE.Vector3(-4.5, 0, -4.5), name: 'Plant' },
-                { url: 'https://cdn.jsdelivr.net/gh/leftyskywalker/Room@main/grand_piano.glb', size: 2.5, pos: new THREE.Vector3(3.5, 0, 0), rot: new THREE.Euler(0, -Math.PI / 2, 0), name: 'Piano' },
-                { url: 'https://cdn.jsdelivr.net/gh/leftyskywalker/Room@main/rug_with_bottom.glb', size: 5, pos: new THREE.Vector3(0, 0.01, 0), name: 'Rug' }
-            ];
+            const models = getObjectData(THREE); // Get data from the external file
+
             models.forEach(m => {
                 loader.load(m.url, (gltf) => {
                     const model = gltf.scene;
                     model.userData.isDraggable = true;
                     model.userData.name = m.name;
-                    setupModel(model, m.size, m.pos, m.rot);
+                    model.userData.url = m.url; // Store url for saving
+                    model.userData.size = m.size; // Store original size for saving
+                    
+                    const initialPos = m.pos || new THREE.Vector3(0,0,0);
+                    const initialRot = m.rot || new THREE.Euler(0,0,0);
+                    const initialScale = m.scale || new THREE.Vector3(1,1,1);
+
+                    setupModel(model, m.size, initialPos, initialRot, initialScale);
                     draggableObjects.push(model);
                 });
             });
         }
 
-        function setupModel(model, desiredSize, position, rotation = new THREE.Euler(0, 0, 0)) {
+        function setupModel(model, desiredSize, position, rotation, scale) {
             const box = new THREE.Box3().setFromObject(model);
             const size = box.getSize(new THREE.Vector3());
             const maxDim = Math.max(size.x, size.y, size.z);
-            const scale = desiredSize / maxDim;
-            model.scale.set(scale, scale, scale);
+            const sizeScale = desiredSize / maxDim;
+            model.scale.set(sizeScale, sizeScale, sizeScale);
+            
+            model.scale.multiply(scale);
+
             const postScaleBox = new THREE.Box3().setFromObject(model);
             model.position.set(position.x, -postScaleBox.min.y + position.y, position.z);
             model.rotation.copy(rotation);
@@ -417,21 +420,39 @@
             setTimeout(() => { buttonElement.textContent = originalText; }, 1500);
         }
 
-        function copyObjectData() { performCopy(objectDataEl.textContent, copyCoordsBtn, 'Copy Selected'); }
+        function copyObjectData() {
+            let dataToCopy = objectDataEl.textContent;
+            dataToCopy = dataToCopy.replace('Name: ', 'name: \'') + '\',';
+            dataToCopy = dataToCopy.replace('pos:', 'pos:');
+            dataToCopy = dataToCopy.replace('rot:', 'rot:');
+            dataToCopy = dataToCopy.replace('scale:', 'scale:');
+            performCopy(dataToCopy, copyCoordsBtn, 'Copy Selected');
+        }
         
         function copyAllObjectData() {
-            let allData = '';
-            draggableObjects.forEach(obj => {
+            let allData = 'const objectData = [\n';
+            draggableObjects.forEach((obj, index) => {
                 const pos = obj.position; const rot = obj.rotation; const scale = obj.scale;
-                 allData += `// ${obj.userData.name}\n` +
-                            `pos: new THREE.Vector3(${pos.x.toFixed(2)}, ${pos.y.toFixed(2)}, ${pos.z.toFixed(2)}),\n` +
-                            `rot: new THREE.Euler(${rot.x.toFixed(2)}, ${rot.y.toFixed(2)}, ${rot.z.toFixed(2)}),\n` +
-                            `scale: new THREE.Vector3(${scale.x.toFixed(2)}, ${scale.y.toFixed(2)}, ${scale.z.toFixed(2)})\n\n`;
+                
+                const box = new THREE.Box3().setFromObject(obj);
+                const size = box.getSize(new THREE.Vector3());
+                const maxDim = Math.max(size.x, size.y, size.z) / Math.max(scale.x, scale.y, scale.z);
+                const sizeScale = obj.userData.size / maxDim;
+                const finalScale = new THREE.Vector3(scale.x / sizeScale, scale.y / sizeScale, scale.z / sizeScale);
+
+                allData += `    {\n` +
+                           `        name: '${obj.userData.name}',\n` +
+                           `        url: '${obj.userData.url}',\n` +
+                           `        size: ${obj.userData.size},\n` +
+                           `        pos: new THREE.Vector3(${pos.x.toFixed(2)}, ${pos.y.toFixed(2)}, ${pos.z.toFixed(2)}),\n` +
+                           `        rot: new THREE.Euler(${rot.x.toFixed(2)}, ${rot.y.toFixed(2)}, ${rot.z.toFixed(2)}),\n` +
+                           `        scale: new THREE.Vector3(${finalScale.x.toFixed(2)}, ${finalScale.y.toFixed(2)}, ${finalScale.z.toFixed(2)})\n` +
+                           `    }${index === draggableObjects.length - 1 ? '' : ','}\n`;
             });
+            allData += '];';
             performCopy(allData, copyAllBtn, 'Copy All');
         }
 
-        // --- History Functions ---
         function saveState() {
             const currentState = draggableObjects.map(obj => ({
                 name: obj.userData.name,
@@ -439,11 +460,7 @@
                 rotation: obj.rotation.clone(),
                 scale: obj.scale.clone()
             }));
-            
-            if (historyIndex < history.length - 1) {
-                history.splice(historyIndex + 1);
-            }
-
+            if (historyIndex < history.length - 1) { history.splice(historyIndex + 1); }
             history.push(currentState);
             historyIndex = history.length - 1;
             updateUndoRedoButtons();
@@ -462,19 +479,11 @@
         }
 
         function undo() {
-            if (historyIndex > 0) {
-                historyIndex--;
-                restoreState(history[historyIndex]);
-                updateUndoRedoButtons();
-            }
+            if (historyIndex > 0) { historyIndex--; restoreState(history[historyIndex]); updateUndoRedoButtons(); }
         }
 
         function redo() {
-            if (historyIndex < history.length - 1) {
-                historyIndex++;
-                restoreState(history[historyIndex]);
-                updateUndoRedoButtons();
-            }
+            if (historyIndex < history.length - 1) { historyIndex++; restoreState(history[historyIndex]); updateUndoRedoButtons(); }
         }
 
         function updateUndoRedoButtons() {
